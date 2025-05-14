@@ -1,0 +1,136 @@
+import unreal
+import json
+import os
+from datetime import datetime
+
+def get_section_timing(section):
+    """Universal timing extraction that works for all section types"""
+    try:
+        # Standard sections
+        if hasattr(section, 'get_start_time'):
+            return {
+                "start_time": section.get_start_time().seconds,
+                "end_time": section.get_end_time().seconds
+            }
+        # DMX/CameraCut sections
+        elif hasattr(section, 'get_range'):
+            time_range = section.get_range()
+            return {
+                "start_time": time_range.get_lower_bound_value().seconds,
+                "end_time": time_range.get_upper_bound_value().seconds
+            }
+        # Fallback
+        return {"start_time": 0.0, "end_time": 0.0}
+    except:
+        return {"start_time": 0.0, "end_time": 0.0}
+
+def export_sequence_to_json(sequence_asset, export_dir):
+    try:
+        sequence_name = sequence_asset.get_name()
+        output_path = os.path.join(export_dir, f"{sequence_name}.json")
+        
+        # Get all tracks including folders
+        all_tracks = []
+        for track in sequence_asset.get_tracks():
+            all_tracks.append(track)
+            if isinstance(track, unreal.MovieSceneFolder):
+                all_tracks.extend(get_tracks_from_folder(track))
+
+        if not all_tracks:
+            unreal.log_warning(f"Skipping empty sequence: {sequence_name}")
+            return False
+
+        sequence_data = {
+            "sequence_name": sequence_name,
+            "sequence_path": sequence_asset.get_path_name(),
+            "tracks": []
+        }
+
+        for track in all_tracks:
+            track_data = {
+                "track_name": track.get_name(),
+                "track_type": track.get_class().get_name()
+            }
+            
+            if hasattr(track, 'get_sections'):
+                track_data["sections"] = []
+                for section in track.get_sections():
+                    section_data = {
+                        "section_name": section.get_name(),
+                        **get_section_timing(section)
+                    }
+                    
+                    # Handle specific section types
+                    if isinstance(section, unreal.MovieSceneSkeletalAnimationSection):
+                        if section.params and section.params.animation:
+                            section_data["animation"] = section.params.animation.get_name()
+                    
+                    elif isinstance(section, unreal.MovieSceneAudioSection):
+                        if hasattr(section, 'get_sound') and section.get_sound():
+                            section_data["sound"] = section.get_sound().get_name()
+                    
+                    elif isinstance(section, unreal.MovieSceneDMXLibrarySection):
+                        # Skip DMX-specific data if methods don't exist
+                        pass
+                    
+                    track_data["sections"].append(section_data)
+            
+            sequence_data["tracks"].append(track_data)
+
+        with open(output_path, "w") as f:
+            json.dump(sequence_data, f, indent=2)
+
+        return True
+
+    except Exception as e:
+        unreal.log_error(f"Export failed for {sequence_name}: {str(e)}")
+        return False
+
+def get_tracks_from_folder(folder_track):
+    """Recursively get tracks from folder structures"""
+    tracks = []
+    for child in folder_track.get_child_master_tracks():
+        tracks.append(child)
+        if isinstance(child, unreal.MovieSceneFolder):
+            tracks.extend(get_tracks_from_folder(child))
+    return tracks
+
+def export_all_sequences(export_dir):
+    os.makedirs(export_dir, exist_ok=True)
+    asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    
+    # Modern class filtering
+    sequence_class = unreal.TopLevelAssetPath("/Script/LevelSequence", "LevelSequence")
+    assets = asset_registry.get_assets_by_class(sequence_class)
+    
+    results = {"success": 0, "empty": 0, "failed": 0}
+    
+    for asset in assets:
+        sequence = unreal.load_asset(asset.package_name)
+        if not sequence:
+            results["failed"] += 1
+            continue
+            
+        if len(sequence.get_tracks()) == 0:
+            results["empty"] += 1
+        elif export_sequence_to_json(sequence, export_dir):
+            results["success"] += 1
+        else:
+            results["failed"] += 1
+    
+    # Generate report with proper timestamp
+    report = {
+        "exported_sequences": results["success"],
+        "empty_sequences": results["empty"],
+        "failed_sequences": results["failed"],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    with open(os.path.join(export_dir, "_export_report.json"), "w") as f:
+        json.dump(report, f, indent=2)
+
+    unreal.log(f"Export complete. Results: {json.dumps(report, indent=2)}")
+
+# Run export
+export_dir = r"C:\Users\unrealengine\Documents\sequence_jsons"
+export_all_sequences(export_dir)
